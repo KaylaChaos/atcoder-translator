@@ -657,6 +657,40 @@ def render_translated_html(contest_id, task_id, title, task_url, statement_html,
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escaped_title} - 中文翻译</title>
+  <link rel="stylesheet" href="https://img.atcoder.jp/public/0a24dba/css/cdn/katex.min.css">
+  <script defer src="https://img.atcoder.jp/public/0a24dba/js/cdn/katex.min.js"></script>
+  <script defer src="https://img.atcoder.jp/public/0a24dba/js/cdn/auto-render.min.js"></script>
+  <script>
+    window.__ATCODER_TRANSLATOR_KATEX_DONE = false;
+    function renderAtCoderMath() {{
+      if (!window.renderMathInElement) {{
+        setTimeout(renderAtCoderMath, 50);
+        return;
+      }}
+      document.querySelectorAll('var').forEach(function(el) {{
+        if (el.dataset.katexPrepared === '1') return;
+        var source = el.innerHTML.replace(/<sub>/g, '_{{').replace(/<\\/sub>/g, '}}');
+        el.innerHTML = '\\\\(' + source + '\\\\)';
+        el.dataset.katexPrepared = '1';
+      }});
+      renderMathInElement(document.body, {{
+        delimiters: [
+          {{left: "$$", right: "$$", display: true}},
+          {{left: "\\\\(", right: "\\\\)", display: false}},
+          {{left: "\\\\[", right: "\\\\]", display: true}}
+        ],
+        ignoredTags: ["script", "noscript", "style", "textarea", "code", "option"],
+        ignoredClasses: ["prettyprint", "source-code-for-copy"],
+        throwOnError: false
+      }});
+      window.__ATCODER_TRANSLATOR_KATEX_DONE = true;
+    }}
+    if (document.readyState === 'loading') {{
+      document.addEventListener('DOMContentLoaded', renderAtCoderMath);
+    }} else {{
+      renderAtCoderMath();
+    }}
+  </script>
   <style>
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC",
@@ -689,6 +723,8 @@ def render_translated_html(contest_id, task_id, title, task_url, statement_html,
       padding: 0.1em 0.3em;
     }}
     var {{ font-family: "Times New Roman", serif; font-style: italic; }}
+    .katex {{ font-size: 1.04em; }}
+    .katex-display {{ overflow-x: auto; overflow-y: hidden; }}
     .notice {{
       background: #fff8c5;
       border: 1px solid #eac54f;
@@ -779,6 +815,10 @@ def render_pdf_bytes(html_text):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 1600})
         page.set_content(watermarked, wait_until="networkidle")
+        try:
+            page.wait_for_function("window.__ATCODER_TRANSLATOR_KATEX_DONE === true", timeout=8000)
+        except Exception:
+            pass
         page.emulate_media(media="print")
         pdf = page.pdf(
             format=env("PDF_PAGE_FORMAT", "A4"),
@@ -1056,7 +1096,7 @@ def run_worker(event=None):
             task_report["translated_key"] = translated_key
             task_report["translate_meta"] = translate_meta
 
-            file_name = f"{contest_id}_{task_id}.zh.html"
+            file_name = f"{task_id}.zh.html"
             file_content = translated_html.encode("utf-8")
             file_content_type = "text/html"
 
@@ -1084,7 +1124,7 @@ def run_worker(event=None):
                         pdf_bytes = render_pdf_bytes(translated_html)
                         task_report["pdf_regenerated_for_send"] = ms_since(pdf_start)
 
-                file_name = f"{contest_id}_{task_id}.zh.pdf"
+                file_name = f"{task_id}.zh.pdf"
                 file_content = pdf_bytes
                 file_content_type = "application/pdf"
 
