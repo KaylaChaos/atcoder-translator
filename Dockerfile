@@ -1,8 +1,11 @@
 FROM mcr.microsoft.com/playwright/python:v1.48.0-jammy
 
+ARG BUILD_ID=local
+
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV IMAGE_BUILD_ID=${BUILD_ID}
 
 WORKDIR /app
 

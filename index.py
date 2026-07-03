@@ -992,6 +992,7 @@ def run_worker(event=None):
     report = {
         "ok": True,
         "mode": "worker",
+        "image_build_id": env("IMAGE_BUILD_ID", "unknown"),
         "contest_id": contest_id,
         "send_enabled": send_enabled,
         "output_format": output_format,
@@ -1257,7 +1258,13 @@ def test_wecom():
 
 def run_probe(event=None):
     started = time.perf_counter()
-    report = {"ok": True, "mode": "probe", "time": now_iso(), "tests": {}}
+    report = {
+        "ok": True,
+        "mode": "probe",
+        "image_build_id": env("IMAGE_BUILD_ID", "unknown"),
+        "time": now_iso(),
+        "tests": {},
+    }
     for name, fn in [
         ("atcoder", test_atcoder),
         ("oss", test_oss),

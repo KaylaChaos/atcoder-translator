@@ -5,11 +5,17 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import index
 
+IMAGE_BUILD_ID = os.getenv("IMAGE_BUILD_ID", "unknown")
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/healthz"):
-            self._send_json(200, {"ok": True, "service": "atcoder-translator"})
+            self._send_json(200, {
+                "ok": True,
+                "service": "atcoder-translator",
+                "image_build_id": IMAGE_BUILD_ID,
+            })
             return
         self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -54,7 +60,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(os.getenv("PORT", "8000"))
     server = HTTPServer(("0.0.0.0", port), Handler)
-    print(f"container server listening on 0.0.0.0:{port}")
+    print(f"container server listening on 0.0.0.0:{port}, image_build_id={IMAGE_BUILD_ID}")
     server.serve_forever()
 
 
