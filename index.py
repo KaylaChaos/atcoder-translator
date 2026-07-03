@@ -111,8 +111,21 @@ def get_atcoder_cookie():
 def atcoder_headers():
     cookie, _ = get_atcoder_cookie()
     headers = {
-        "User-Agent": env("ATCODER_USER_AGENT", "Mozilla/5.0 atcoder-translator-worker/0.1"),
+        "User-Agent": env(
+            "ATCODER_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36",
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9,ja;q=0.8,zh-CN;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
     }
     if cookie and cookie.upper() not in ("NONE", "NULL", "DISABLED", "-"):
         headers["Cookie"] = cookie

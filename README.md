@@ -28,6 +28,7 @@ WORKER_MODE=worker
 ATCODER_CONTEST_ID=auto
 ATCODER_AUTO_CONTEST_MODE=active_or_next
 ATCODER_REVEL_SESSION=<REVEL_SESSION value only>
+ATCODER_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36
 
 ALI_OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com
 ALI_OSS_BUCKET=<bucket>
