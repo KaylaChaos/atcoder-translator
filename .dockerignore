@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.zip
+*.pdf
+*.preview.png
+*.watermarked.html
+sample_pdf_test*
+README.md
