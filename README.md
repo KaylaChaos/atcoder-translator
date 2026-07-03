@@ -27,6 +27,7 @@ WORKER_MODE=worker
 
 ATCODER_CONTEST_ID=auto
 ATCODER_AUTO_CONTEST_MODE=active_or_next
+ATCODER_AUTO_INCLUDE_UPCOMING=0
 ATCODER_REVEL_SESSION=<REVEL_SESSION value only>
 ATCODER_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36
 
@@ -107,9 +108,14 @@ ATCODER_AUTO_CONTEST_MODE=active_or_next
 The worker resolves the contest id from AtCoder's contests page:
 
 1. First ABC in `Active Contests`.
-2. First ABC in `Upcoming Contests`.
-3. First ABC in `Recent Contests`.
-4. Largest ABC number as fallback.
+2. First ABC in `Recent Contests`.
+3. Largest ABC number as fallback if neither section is found.
+
+By default, it does not use `Upcoming Contests`, because upcoming task pages are often 404 until the contest starts. If you want to test upcoming-first behavior, set:
+
+```text
+ATCODER_AUTO_INCLUDE_UPCOMING=1
+```
 
 An explicit event value still overrides auto detection:
 

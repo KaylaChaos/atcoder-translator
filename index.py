@@ -332,6 +332,13 @@ def html_section_after_heading(page_html, heading):
 
 
 def resolve_auto_contest_id():
+    candidates = resolve_auto_contest_ids()
+    if candidates:
+        return candidates[0]
+    raise RuntimeError("cannot find any ABC contest id on AtCoder contests page")
+
+
+def resolve_auto_contest_ids():
     url = env("ATCODER_CONTESTS_URL", "https://atcoder.jp/contests/?lang=en")
     res = atcoder_get(url)
     if not res.get("ok"):
@@ -346,18 +353,31 @@ def resolve_auto_contest_id():
     all_ids = contest_ids_in_html(page_html)
 
     if mode == "latest_number" and all_ids:
-        return max(all_ids, key=lambda cid: int(cid[3:]))
+        return [max(all_ids, key=lambda cid: int(cid[3:]))]
 
-    if active:
-        return active[0]
-    if upcoming:
-        return upcoming[0]
-    if recent:
-        return recent[0]
-    if all_ids:
-        return max(all_ids, key=lambda cid: int(cid[3:]))
+    candidates = []
 
-    raise RuntimeError("cannot find any ABC contest id on AtCoder contests page")
+    # Default policy:
+    # 1. Prefer an ABC that is currently active.
+    # 2. Otherwise prefer the newest already-public ABC from Recent Contests.
+    # Upcoming contests are intentionally skipped because their /tasks pages are
+    # often 404 until the contest starts.
+    for group in (active, recent):
+        for cid in group:
+            if cid not in candidates:
+                candidates.append(cid)
+
+    if env("ATCODER_AUTO_INCLUDE_UPCOMING", "0") == "1":
+        for cid in upcoming[:1]:
+            if cid not in candidates:
+                candidates.insert(len(active), cid)
+
+    if not candidates and all_ids:
+        for cid in sorted(all_ids, key=lambda x: int(x[3:]), reverse=True):
+            if cid not in candidates:
+                candidates.append(cid)
+
+    return candidates
 
 
 class SpanInnerExtractor(HTMLParser):
@@ -967,6 +987,53 @@ def get_contest_id(event):
     return value
 
 
+def parse_event_json(value):
+    current = value
+    for _ in range(3):
+        if isinstance(current, dict):
+            return current
+        if not isinstance(current, str) or not current.strip():
+            return None
+        try:
+            current = json.loads(current)
+        except Exception:
+            return None
+    return current if isinstance(current, dict) else None
+
+
+def normalize_event(event):
+    parsed_event = parse_event_json(event)
+    if parsed_event is not None:
+        event = parsed_event
+    if not isinstance(event, dict):
+        return {"_raw_event_type": type(event).__name__}
+
+    normalized = dict(event)
+
+    for key in ("body", "Body"):
+        parsed = parse_event_json(event.get(key))
+        if isinstance(parsed, dict):
+            normalized.update(parsed)
+
+    for key in ("user_event", "UserEvent", "userEvent"):
+        parsed = parse_event_json(normalized.get(key))
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("input"), dict):
+                parsed = parsed["input"]
+            normalized.update(parsed)
+
+    return normalized
+
+
+def is_auto_contest_request(event):
+    if isinstance(event, dict):
+        value = event.get("contest_id") or event.get("contest")
+        if value:
+            return str(value).strip().lower() in ("auto", "latest", "latest_abc", "next_abc")
+    value = env("ATCODER_CONTEST_ID", "auto")
+    return value.lower() in ("", "auto", "latest", "latest_abc", "next_abc")
+
+
 def get_target_task_ids(event):
     if isinstance(event, dict) and event.get("task_ids"):
         value = event["task_ids"]
@@ -982,6 +1049,7 @@ def run_worker(event=None):
     cfg = oss_config()
     require_oss_config(cfg)
 
+    auto_contest = is_auto_contest_request(event)
     contest_id = get_contest_id(event)
     target_task_ids = get_target_task_ids(event)
     max_tasks = int(env("MAX_TASKS_PER_RUN", "8"))
@@ -999,25 +1067,55 @@ def run_worker(event=None):
         "time": now_iso(),
         "tasks": [],
     }
+    if isinstance(event, dict):
+        report["event_debug"] = {
+            "keys": sorted(str(k) for k in event.keys() if not str(k).startswith("_raw")),
+            "contest_id": event.get("contest_id") or event.get("contest"),
+            "task_ids": event.get("task_ids"),
+            "trigger_type": event.get("trigger_type"),
+            "trigger_name": event.get("trigger_name"),
+            "has_user_event": any(k in event for k in ("user_event", "UserEvent", "userEvent")),
+            "raw_preview": event.get("_raw_event_preview", "")[:500],
+        }
+
+    candidates = [contest_id]
+    if auto_contest:
+        candidates = resolve_auto_contest_ids()
+        if contest_id not in candidates:
+            candidates.insert(0, contest_id)
+        report["auto_contest_candidates"] = candidates
+
+    tasks_res = None
+    task_list_attempts = []
+    for candidate in candidates:
+        tasks_url = f"https://atcoder.jp/contests/{candidate}/tasks"
+        current = atcoder_get(tasks_url)
+        attempt = {
+            "contest_id": candidate,
+            "url": tasks_url,
+            "ok": current.get("ok"),
+            "status": current.get("status"),
+            "ms": current.get("ms"),
+            "bytes": current.get("bytes"),
+        }
+        task_list_attempts.append(attempt)
+        if current.get("ok"):
+            contest_id = candidate
+            tasks_res = current
+            break
+
+    report["contest_id"] = contest_id
+    report["task_list_attempts"] = task_list_attempts
+    report["task_list"] = task_list_attempts[-1] if task_list_attempts else {}
+
+    if not tasks_res or not tasks_res.get("ok"):
+        report["ok"] = False
+        report["error"] = "failed to fetch task list"
+        report["detail"] = current.get("error") or current.get("body_preview") if task_list_attempts else ""
+        return report
 
     status = load_status(cfg, contest_id)
     status.setdefault("tasks", {})
-
-    tasks_url = f"https://atcoder.jp/contests/{contest_id}/tasks"
-    tasks_res = atcoder_get(tasks_url)
-    report["task_list"] = {
-        "url": tasks_url,
-        "ok": tasks_res.get("ok"),
-        "status": tasks_res.get("status"),
-        "ms": tasks_res.get("ms"),
-        "bytes": tasks_res.get("bytes"),
-    }
-
-    if not tasks_res.get("ok"):
-        report["ok"] = False
-        report["error"] = "failed to fetch task list"
-        report["detail"] = tasks_res.get("error") or tasks_res.get("body_preview")
-        return report
 
     task_infos = parse_tasks(contest_id, tasks_res.get("body", ""))
     if target_task_ids:
@@ -1265,6 +1363,16 @@ def run_probe(event=None):
         "time": now_iso(),
         "tests": {},
     }
+    if isinstance(event, dict):
+        report["event_debug"] = {
+            "keys": sorted(str(k) for k in event.keys() if not str(k).startswith("_raw")),
+            "contest_id": event.get("contest_id") or event.get("contest"),
+            "task_ids": event.get("task_ids"),
+            "trigger_type": event.get("trigger_type"),
+            "trigger_name": event.get("trigger_name"),
+            "has_user_event": any(k in event for k in ("user_event", "UserEvent", "userEvent")),
+            "raw_preview": event.get("_raw_event_preview", "")[:500],
+        }
     for name, fn in [
         ("atcoder", test_atcoder),
         ("oss", test_oss),
@@ -1290,6 +1398,9 @@ def run_probe(event=None):
 
 def handler(event, context):
     try:
+        raw_event_preview = str(event)[:1000]
+        event = normalize_event(event)
+        event["_raw_event_preview"] = raw_event_preview
         mode = env("WORKER_MODE", "worker").lower()
         if isinstance(event, dict) and event.get("mode"):
             mode = str(event["mode"]).lower()
