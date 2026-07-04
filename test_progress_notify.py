@@ -29,5 +29,18 @@ class ProgressNotifyTests(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class OpenAITextExtractionTests(unittest.TestCase):
+    def test_empty_responses_text_raises_for_auto_fallback(self):
+        with self.assertRaisesRegex(RuntimeError, "empty text"):
+            index.ensure_openai_text("responses", "")
+
+    def test_non_empty_responses_text_is_returned(self):
+        self.assertEqual(index.ensure_openai_text("responses", "pong"), "pong")
+
+    def test_json_object_parse_error_reports_preview(self):
+        with self.assertRaisesRegex(ValueError, "preview"):
+            index.parse_json_object("")
+
+
 if __name__ == "__main__":
     unittest.main()

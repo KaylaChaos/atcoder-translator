@@ -620,24 +620,54 @@ def parse_json_array(text):
     raise ValueError("model output is not a JSON array")
 
 
+def compact_preview(text, limit=240):
+    value = str(text or "")
+    value = value.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    if not value:
+        return "<empty>"
+    if len(value) > limit:
+        return value[:limit] + "..."
+    return value
+
+
 def parse_json_object(text):
-    text = text.strip()
+    text = str(text or "").strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
+    last_error = None
     try:
         data = json.loads(text)
         if isinstance(data, dict):
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        last_error = e
 
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
-        data = json.loads(text[start:end + 1])
-        if isinstance(data, dict):
-            return data
-    raise ValueError("model output is not a JSON object")
+        try:
+            data = json.loads(text[start:end + 1])
+            if isinstance(data, dict):
+                return data
+        except Exception as e:
+            last_error = e
+    detail = f"; parse_error={last_error}" if last_error else ""
+    raise ValueError(f"model output is not a JSON object; preview={compact_preview(text)}{detail}")
+
+
+def ensure_openai_text(source, text):
+    if not str(text or "").strip():
+        raise RuntimeError(f"OpenAI {source} returned empty text")
+    return text
+
+
+def save_solution_debug_text(cfg, contest_id, task_id, stage, text):
+    if not cfg or not contest_id or not task_id:
+        return ""
+    safe_stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", stage)
+    key = f"{cfg['prefix']}/solutions/{contest_id}/debug/{task_id}.{safe_stage}.txt"
+    oss_put_bytes(cfg, key, str(text or "").encode("utf-8"), "text/plain; charset=utf-8")
+    return key
 
 
 def extract_responses_text(resp_json):
@@ -678,7 +708,7 @@ def openai_generate_text(prompt, max_tokens, model_override=""):
         res = http_request("POST", f"{base_url}/responses", headers=headers, body=body, timeout=120)
         if not res.get("ok"):
             raise RuntimeError(f"OpenAI responses failed: {res}")
-        return extract_responses_text(json.loads(res["body"]))
+        return ensure_openai_text("responses", extract_responses_text(json.loads(res["body"])))
 
     def call_chat():
         body = {
@@ -690,7 +720,7 @@ def openai_generate_text(prompt, max_tokens, model_override=""):
         if not res.get("ok"):
             raise RuntimeError(f"OpenAI chat completions failed: {res}")
         data = json.loads(res["body"])
-        return data["choices"][0]["message"]["content"]
+        return ensure_openai_text("chat completions", data["choices"][0]["message"]["content"])
 
     if mode == "responses":
         return call_responses()
@@ -1419,7 +1449,46 @@ def load_json_object(cfg, key, default=None):
         return default if default is not None else {}
 
 
-def generate_solution_json(task_id, title, statement_text):
+def parse_solution_json_with_repair(raw, task_id, title, statement_text, stage, max_tokens,
+                                    solution_model="", cfg=None, contest_id=""):
+    try:
+        return parse_json_object(raw)
+    except Exception as first_error:
+        raw_key = save_solution_debug_text(cfg, contest_id, task_id, f"{stage}.raw", raw)
+        if env("SOLUTION_JSON_REPAIR_PASS", "1") != "1" or not str(raw or "").strip():
+            suffix = f"; raw_key={raw_key}" if raw_key else ""
+            raise ValueError(f"{stage} JSON parse failed{suffix}: {first_error}") from first_error
+
+        repair_prompt = (
+            "Convert the following model output into one valid JSON object.\n"
+            "Return ONLY JSON. Do not add Markdown fences or explanations.\n"
+            "The object must have exactly these keys:\n"
+            "title, overview, algorithm, proof_idea, complexity, cpp17.\n"
+            "Keep the existing meaning. Escape all newlines and backslashes correctly inside JSON strings.\n"
+            "If a field is missing, fill it with an empty string.\n\n"
+            f"Problem id: {task_id}\n"
+            f"Problem title: {title}\n"
+            "Problem statement excerpt:\n"
+            + statement_text[:6000]
+            + "\n\nBad model output:\n"
+            + str(raw or "")[:24000]
+        )
+        repaired = openai_generate_text(repair_prompt, max_tokens, model_override=solution_model)
+        repaired_key = save_solution_debug_text(cfg, contest_id, task_id, f"{stage}.repaired", repaired)
+        try:
+            return parse_json_object(repaired)
+        except Exception as repair_error:
+            suffix = ""
+            if raw_key:
+                suffix += f"; raw_key={raw_key}"
+            if repaired_key:
+                suffix += f"; repaired_key={repaired_key}"
+            raise ValueError(
+                f"{stage} JSON repair failed{suffix}: {repair_error}"
+            ) from repair_error
+
+
+def generate_solution_json(task_id, title, statement_text, cfg=None, contest_id=""):
     max_tokens = int(env("OPENAI_SOLUTION_MAX_TOKENS", "7000"))
     solution_model = env("OPENAI_SOLUTION_MODEL") or env("OPENAI_MODEL")
     prompt = (
@@ -1445,7 +1514,10 @@ def generate_solution_json(task_id, title, statement_text):
         + statement_text[:18000]
     )
     raw = openai_generate_text(prompt, max_tokens, model_override=solution_model)
-    data = parse_json_object(raw)
+    data = parse_solution_json_with_repair(
+        raw, task_id, title, statement_text, "draft", max_tokens,
+        solution_model=solution_model, cfg=cfg, contest_id=contest_id,
+    )
     data.setdefault("title", title)
     data.setdefault("overview", "")
     data.setdefault("algorithm", "")
@@ -1466,7 +1538,10 @@ def generate_solution_json(task_id, title, statement_text):
             + json.dumps(data, ensure_ascii=False)
         )
         reviewed = openai_generate_text(review_prompt, max_tokens, model_override=solution_model)
-        data = parse_json_object(reviewed)
+        data = parse_solution_json_with_repair(
+            reviewed, task_id, title, statement_text, "review", max_tokens,
+            solution_model=solution_model, cfg=cfg, contest_id=contest_id,
+        )
         data.setdefault("title", title)
         data.setdefault("overview", "")
         data.setdefault("algorithm", "")
@@ -1735,7 +1810,9 @@ def run_solutions(event=None):
                     progress_enabled,
                     f"[solutions] {task_id} ask model review={env('SOLUTION_REVIEW_PASS', '1')}",
                 )
-                solution_obj = generate_solution_json(task_id, title, statement_text)
+                solution_obj = generate_solution_json(
+                    task_id, title, statement_text, cfg=cfg, contest_id=contest_id,
+                )
                 oss_put_json(cfg, solution_key, {
                     "contest_id": contest_id,
                     "task_id": task_id,
