@@ -1009,6 +1009,16 @@ def wecom_send_text(content):
     return data
 
 
+def maybe_send_progress(enabled, content, sender=wecom_send_text):
+    if not enabled:
+        return False
+    try:
+        sender(content)
+        return True
+    except Exception:
+        return False
+
+
 def http_multipart_file(url, field_name, filename, content, content_type, timeout=60):
     boundary = "----fg-boundary-" + uuid.uuid4().hex
     head = (
@@ -1617,6 +1627,7 @@ def run_solutions(event=None):
 
     force = env("FORCE_REPROCESS", "0") == "1" or env("SOLUTION_FORCE_REPROCESS", "0") == "1"
     send_enabled = env("WECOM_SEND", "0") == "1"
+    progress_enabled = env("SOLUTION_PROGRESS_NOTIFY", "1") == "1"
     target_task_ids = get_target_task_ids(event)
     allowed_letters = allowed_solution_letters()
 
@@ -1625,6 +1636,7 @@ def run_solutions(event=None):
         "mode": "solutions",
         "image_build_id": env("IMAGE_BUILD_ID", "unknown"),
         "send_enabled": send_enabled,
+        "progress_notify": progress_enabled,
         "task_letters": sorted(allowed_letters),
         "time": now_iso(),
         "tasks": [],
@@ -1637,6 +1649,14 @@ def run_solutions(event=None):
             "raw_preview": event.get("_raw_event_preview", "")[:500],
         }
 
+    requested_contest = env("ATCODER_CONTEST_ID", "auto")
+    if isinstance(event, dict):
+        requested_contest = event.get("contest_id") or event.get("contest") or requested_contest
+    maybe_send_progress(
+        progress_enabled,
+        f"[solutions] start contest={requested_contest} image={report['image_build_id']}",
+    )
+
     contest_id, tasks_res, attempts = resolve_task_list_for_event(event, report)
     report["contest_id"] = contest_id
     report["task_list_attempts"] = attempts
@@ -1644,6 +1664,10 @@ def run_solutions(event=None):
     if not tasks_res:
         report["ok"] = False
         report["error"] = "failed to fetch task list"
+        maybe_send_progress(
+            progress_enabled,
+            f"[solutions] {contest_id} failed: cannot fetch task list",
+        )
         return report
 
     delivery_key = f"{cfg['prefix']}/solutions/{contest_id}/delivery.json"
@@ -1653,6 +1677,10 @@ def run_solutions(event=None):
         report["reason"] = "solutions already sent"
         report["delivery"] = delivery
         report["total_ms"] = ms_since(started)
+        maybe_send_progress(
+            progress_enabled,
+            f"[solutions] {contest_id} skipped: already sent",
+        )
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return report
 
@@ -1665,12 +1693,18 @@ def run_solutions(event=None):
     max_tasks = int(env("SOLUTION_MAX_TASKS", str(len(allowed_letters))))
     task_infos = task_infos[:max_tasks]
     report["discovered_task_count"] = len(task_infos)
+    selected_ids = [x["task_id"] for x in task_infos]
+    maybe_send_progress(
+        progress_enabled,
+        f"[solutions] {contest_id} selected {len(selected_ids)} task(s): {', '.join(selected_ids) or 'none'}",
+    )
 
     solutions = []
     for task in task_infos:
         task_id = task["task_id"]
         task_report = {"task_id": task_id, "url": task["url"]}
         try:
+            maybe_send_progress(progress_enabled, f"[solutions] {task_id} fetch statement")
             page_res = atcoder_get(task["url"])
             task_report["fetch"] = {
                 "ok": page_res.get("ok"),
@@ -1694,8 +1728,13 @@ def run_solutions(event=None):
             if cached.get("source_hash") == source_hash and cached.get("solution") and not force:
                 solution_obj = cached["solution"]
                 task_report["solution_cached"] = True
+                maybe_send_progress(progress_enabled, f"[solutions] {task_id} use cached solution")
             else:
                 sol_start = time.perf_counter()
+                maybe_send_progress(
+                    progress_enabled,
+                    f"[solutions] {task_id} ask model review={env('SOLUTION_REVIEW_PASS', '1')}",
+                )
                 solution_obj = generate_solution_json(task_id, title, statement_text)
                 oss_put_json(cfg, solution_key, {
                     "contest_id": contest_id,
@@ -1707,6 +1746,10 @@ def run_solutions(event=None):
                     "generated_at": now_iso(),
                 })
                 task_report["solution"] = {"ms": ms_since(sol_start)}
+                maybe_send_progress(
+                    progress_enabled,
+                    f"[solutions] {task_id} model done in {task_report['solution']['ms']}ms",
+                )
 
             solutions.append({
                 "task_id": task_id,
@@ -1719,12 +1762,17 @@ def run_solutions(event=None):
             task_report["ok"] = False
             task_report["error"] = repr(e)
             report["ok"] = False
+            maybe_send_progress(
+                progress_enabled,
+                f"[solutions] {task_id} failed: {repr(e)[:180]}",
+            )
         report["tasks"].append(task_report)
 
     if not solutions:
         report["ok"] = False
         report["error"] = "no solutions generated"
         report["total_ms"] = ms_since(started)
+        maybe_send_progress(progress_enabled, f"[solutions] {contest_id} failed: no solutions generated")
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return report
 
@@ -1738,6 +1786,7 @@ def run_solutions(event=None):
     oss_put_bytes(cfg, html_key, book_html.encode("utf-8"), "text/html; charset=utf-8")
 
     pdf_start = time.perf_counter()
+    maybe_send_progress(progress_enabled, f"[solutions] {contest_id} render combined PDF")
     pdf_bytes = render_pdf_bytes(book_html)
     oss_put_bytes(cfg, pdf_key, pdf_bytes, "application/pdf")
     report["combined"] = {
@@ -1746,9 +1795,14 @@ def run_solutions(event=None):
         "pdf_bytes": len(pdf_bytes),
         "pdf_ms": ms_since(pdf_start),
     }
+    maybe_send_progress(
+        progress_enabled,
+        f"[solutions] {contest_id} PDF ready bytes={len(pdf_bytes)}",
+    )
 
     if send_enabled:
         file_name = f"{contest_id}_solutions_A-F.zh.pdf"
+        maybe_send_progress(progress_enabled, f"[solutions] {contest_id} send combined PDF")
         result = wecom_send_file(file_name, pdf_bytes, "application/pdf")
         delivery = {
             "sent": True,
@@ -1759,8 +1813,10 @@ def run_solutions(event=None):
         }
         oss_put_json(cfg, delivery_key, delivery)
         report["sent"] = True
+        maybe_send_progress(progress_enabled, f"[solutions] {contest_id} sent combined PDF")
     else:
         report["sent"] = False
+        maybe_send_progress(progress_enabled, f"[solutions] {contest_id} finished, WECOM_SEND=0")
 
     report["processed_count"] = len(solutions)
     report["total_ms"] = ms_since(started)

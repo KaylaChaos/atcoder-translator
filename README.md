@@ -134,9 +134,12 @@ SOLUTION_MAX_TASKS=6
 OPENAI_SOLUTION_MAX_TOKENS=7000
 OPENAI_SOLUTION_MODEL=<optional-stronger-model>
 SOLUTION_REVIEW_PASS=1
+SOLUTION_PROGRESS_NOTIFY=1
 ```
 
 `OPENAI_SOLUTION_MODEL` is optional. If it is empty, the worker uses `OPENAI_MODEL`. `SOLUTION_REVIEW_PASS=1` asks the model to review and correct the generated editorial/code once before rendering the final PDF.
+
+`SOLUTION_PROGRESS_NOTIFY=1` sends short WeCom text progress messages while solution generation is running. This is useful on FunctionGraph when only the final log result is visible.
 
 The worker caches each task solution under:
 
