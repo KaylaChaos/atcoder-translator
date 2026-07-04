@@ -322,7 +322,13 @@ def html_section_after_heading(page_html, heading):
     if idx < 0:
         return ""
     next_idx = len(page_html)
-    for other in ("Active Contests", "Upcoming Contests", "Recent Contests"):
+    for other in (
+        "Ongoing Contests",
+        "Active Contests",
+        "Permanent Contests",
+        "Upcoming Contests",
+        "Recent Contests",
+    ):
         if other == heading:
             continue
         j = page_html.find(other, idx + len(heading))
@@ -347,7 +353,10 @@ def resolve_auto_contest_ids():
     page_html = res.get("body", "")
     mode = env("ATCODER_AUTO_CONTEST_MODE", "active_or_next").lower()
 
-    active = contest_ids_in_html(html_section_after_heading(page_html, "Active Contests"))
+    active = contest_ids_in_html(html_section_after_heading(page_html, "Ongoing Contests"))
+    for cid in contest_ids_in_html(html_section_after_heading(page_html, "Active Contests")):
+        if cid not in active:
+            active.append(cid)
     upcoming = contest_ids_in_html(html_section_after_heading(page_html, "Upcoming Contests"))
     recent = contest_ids_in_html(html_section_after_heading(page_html, "Recent Contests"))
     all_ids = contest_ids_in_html(page_html)
@@ -359,18 +368,15 @@ def resolve_auto_contest_ids():
 
     # Default policy:
     # 1. Prefer an ABC that is currently active.
-    # 2. Otherwise prefer the newest already-public ABC from Recent Contests.
-    # Upcoming contests are intentionally skipped because their /tasks pages are
-    # often 404 until the contest starts.
-    for group in (active, recent):
+    # 2. Try the nearest upcoming ABC candidates. Their /tasks pages are often
+    #    404 before the contest starts, so run_worker will skip inaccessible
+    #    candidates and keep trying.
+    # 3. Otherwise prefer the newest already-public ABC from Recent Contests.
+    upcoming_limit = int(env("ATCODER_AUTO_UPCOMING_LIMIT", "3"))
+    for group in (active, upcoming[:upcoming_limit], recent):
         for cid in group:
             if cid not in candidates:
                 candidates.append(cid)
-
-    if env("ATCODER_AUTO_INCLUDE_UPCOMING", "0") == "1":
-        for cid in upcoming[:1]:
-            if cid not in candidates:
-                candidates.insert(len(active), cid)
 
     if not candidates and all_ids:
         for cid in sorted(all_ids, key=lambda x: int(x[3:]), reverse=True):
@@ -438,6 +444,58 @@ class SpanInnerExtractor(HTMLParser):
     def handle_comment(self, data):
         if self.capturing:
             self.parts.append(f"<!--{data}-->")
+
+
+class PlainTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip_stack = []
+        self.pre_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self.skip_stack.append(tag)
+            return
+        if self.skip_stack:
+            return
+        if tag in ("p", "div", "section", "h1", "h2", "h3", "li", "ul", "ol", "pre"):
+            self.parts.append("\n")
+        if tag == "br":
+            self.parts.append("\n")
+        if tag == "li":
+            self.parts.append("- ")
+        if tag == "pre":
+            self.pre_depth += 1
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if self.skip_stack:
+            if self.skip_stack[-1] == tag:
+                self.skip_stack.pop()
+            return
+        if tag in ("p", "div", "section", "h1", "h2", "h3", "li", "ul", "ol", "pre"):
+            self.parts.append("\n")
+        if tag == "pre" and self.pre_depth:
+            self.pre_depth -= 1
+
+    def handle_data(self, data):
+        if self.skip_stack:
+            return
+        self.parts.append(data)
+
+
+def html_to_plain_text(fragment):
+    parser = PlainTextExtractor()
+    parser.feed(fragment)
+    text = "".join(parser.parts)
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def extract_english_statement(page_html):
@@ -562,6 +620,26 @@ def parse_json_array(text):
     raise ValueError("model output is not a JSON array")
 
 
+def parse_json_object(text):
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        data = json.loads(text[start:end + 1])
+        if isinstance(data, dict):
+            return data
+    raise ValueError("model output is not a JSON object")
+
+
 def extract_responses_text(resp_json):
     if "output_text" in resp_json:
         return resp_json["output_text"]
@@ -574,9 +652,9 @@ def extract_responses_text(resp_json):
     return "".join(texts)
 
 
-def openai_generate_text(prompt, max_tokens):
+def openai_generate_text(prompt, max_tokens, model_override=""):
     api_key = env("OPENAI_API_KEY")
-    model = env("OPENAI_MODEL")
+    model = model_override or env("OPENAI_MODEL")
     base_url = normalize_base_url(env("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     mode = env("OPENAI_API_MODE", "auto").lower()
 
@@ -783,6 +861,45 @@ def render_translated_html(contest_id, task_id, title, task_url, statement_html,
   <footer class="meta" data-meta="{meta_json}"></footer>
 </body>
 </html>
+"""
+
+
+def katex_head_html():
+    return """
+  <link rel="stylesheet" href="https://img.atcoder.jp/public/0a24dba/css/cdn/katex.min.css">
+  <script defer src="https://img.atcoder.jp/public/0a24dba/js/cdn/katex.min.js"></script>
+  <script defer src="https://img.atcoder.jp/public/0a24dba/js/cdn/auto-render.min.js"></script>
+  <script>
+    window.__ATCODER_TRANSLATOR_KATEX_DONE = false;
+    function renderAtCoderMath() {
+      if (!window.renderMathInElement) {
+        setTimeout(renderAtCoderMath, 50);
+        return;
+      }
+      document.querySelectorAll('var').forEach(function(el) {
+        if (el.dataset.katexPrepared === '1') return;
+        var source = el.innerHTML.replace(/<sub>/g, '_{').replace(/<\\/sub>/g, '}');
+        el.innerHTML = '\\\\(' + source + '\\\\)';
+        el.dataset.katexPrepared = '1';
+      });
+      renderMathInElement(document.body, {
+        delimiters: [
+          {left: "$$", right: "$$", display: true},
+          {left: "\\\\(", right: "\\\\)", display: false},
+          {left: "\\\\[", right: "\\\\]", display: true}
+        ],
+        ignoredTags: ["script", "noscript", "style", "textarea", "code", "option"],
+        ignoredClasses: ["prettyprint", "source-code-for-copy"],
+        throwOnError: false
+      });
+      window.__ATCODER_TRANSLATOR_KATEX_DONE = true;
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', renderAtCoderMath);
+    } else {
+      renderAtCoderMath();
+    }
+  </script>
 """
 
 
@@ -1271,6 +1388,386 @@ def run_worker(event=None):
     return report
 
 
+def task_letter(task_id):
+    m = re.search(r"_([a-z])$", task_id, re.I)
+    return m.group(1).upper() if m else ""
+
+
+def allowed_solution_letters():
+    raw = env("SOLUTION_TASK_LETTERS", "A,B,C,D,E,F")
+    return {x.strip().upper() for x in raw.split(",") if x.strip()}
+
+
+def load_json_object(cfg, key, default=None):
+    raw = oss_get_text(cfg, key, default="")
+    if not raw:
+        return default if default is not None else {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else (default if default is not None else {})
+    except Exception:
+        return default if default is not None else {}
+
+
+def generate_solution_json(task_id, title, statement_text):
+    max_tokens = int(env("OPENAI_SOLUTION_MAX_TOKENS", "7000"))
+    solution_model = env("OPENAI_SOLUTION_MODEL") or env("OPENAI_MODEL")
+    prompt = (
+        "You are a competitive programming teacher writing editorials for Chinese middle-school students.\n"
+        "Write a clear, friendly, concise Simplified Chinese solution for the following AtCoder problem.\n"
+        "Return ONLY one JSON object with these exact keys:\n"
+        "  title: string\n"
+        "  overview: string, a short intuitive explanation\n"
+        "  algorithm: string, step-by-step algorithm\n"
+        "  proof_idea: string, why the algorithm is correct, simple wording\n"
+        "  complexity: string, time and memory complexity\n"
+        "  cpp17: string, complete accepted C++17 code\n"
+        "Rules:\n"
+        "- Do not include Markdown fences.\n"
+        "- Keep explanations suitable for younger students.\n"
+        "- Use standard algorithm-contest C++17 style.\n"
+        "- Write math formulas in KaTeX-compatible form, using \\(...\\) for inline math and \\[...\\] for display math.\n"
+        "- For example, write \\(O(N \\log N)\\), \\(1 \\le i \\le N\\), and \\(A_i\\).\n"
+        "- The code must be complete and include main().\n\n"
+        f"Problem id: {task_id}\n"
+        f"Problem title: {title}\n"
+        "Problem statement:\n"
+        + statement_text[:18000]
+    )
+    raw = openai_generate_text(prompt, max_tokens, model_override=solution_model)
+    data = parse_json_object(raw)
+    data.setdefault("title", title)
+    data.setdefault("overview", "")
+    data.setdefault("algorithm", "")
+    data.setdefault("proof_idea", "")
+    data.setdefault("complexity", "")
+    data.setdefault("cpp17", "")
+    if env("SOLUTION_REVIEW_PASS", "1") == "1":
+        review_prompt = (
+            "You are reviewing an AtCoder editorial and C++17 solution for correctness.\n"
+            "Check for algorithm mistakes, edge cases, complexity mistakes, and C++ bugs.\n"
+            "Return ONLY the corrected JSON object with the same keys:\n"
+            "title, overview, algorithm, proof_idea, complexity, cpp17.\n"
+            "Keep the explanation in Simplified Chinese for middle-school students.\n"
+            "Use KaTeX-compatible math with \\(...\\) or \\[...\\].\n\n"
+            "Problem statement:\n"
+            + statement_text[:14000]
+            + "\n\nDraft JSON:\n"
+            + json.dumps(data, ensure_ascii=False)
+        )
+        reviewed = openai_generate_text(review_prompt, max_tokens, model_override=solution_model)
+        data = parse_json_object(reviewed)
+        data.setdefault("title", title)
+        data.setdefault("overview", "")
+        data.setdefault("algorithm", "")
+        data.setdefault("proof_idea", "")
+        data.setdefault("complexity", "")
+        data.setdefault("cpp17", "")
+    return data
+
+
+def html_paragraphs(text):
+    text = str(text or "").strip()
+    if not text:
+        return "<p></p>"
+    blocks = [x.strip() for x in re.split(r"\n\s*\n", text) if x.strip()]
+    if not blocks:
+        blocks = [text]
+    return "\n".join(
+        "<p>" + html.escape(block).replace("\n", "<br>") + "</p>"
+        for block in blocks
+    )
+
+
+def render_solutions_html(contest_id, solutions, meta):
+    generated_at = html.escape(now_iso())
+    title = html.escape(f"{contest_id} A-F Solutions")
+    meta_json = html.escape(json.dumps(meta, ensure_ascii=False))
+    sections = []
+    for sol in solutions:
+        task_id = html.escape(sol.get("task_id", ""))
+        task_title = html.escape(sol.get("title", ""))
+        original_url = html.escape(sol.get("url", ""))
+        content = sol.get("solution", {})
+        code = html.escape(content.get("cpp17", ""))
+        sections.append(f"""
+<section class="task-solution">
+  <h2>{task_id} - {task_title}</h2>
+  <div class="meta"><a href="{original_url}">{original_url}</a></div>
+  <h3>Solution Overview</h3>
+  {html_paragraphs(content.get("overview", ""))}
+  <h3>Algorithm</h3>
+  {html_paragraphs(content.get("algorithm", ""))}
+  <h3>Correctness Idea</h3>
+  {html_paragraphs(content.get("proof_idea", ""))}
+  <h3>Complexity</h3>
+  {html_paragraphs(content.get("complexity", ""))}
+  <h3>C++17 Code</h3>
+  <pre><code>{code}</code></pre>
+</section>
+""")
+
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  {katex_head_html()}
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans CJK SC",
+        "Microsoft YaHei", Arial, sans-serif;
+      line-height: 1.68;
+      color: #17202a;
+      margin: 28px auto;
+      max-width: 940px;
+      padding: 0 22px 40px;
+    }}
+    header {{
+      border-bottom: 1px solid #d8dee4;
+      margin-bottom: 24px;
+      padding-bottom: 14px;
+    }}
+    h1 {{ font-size: 25px; margin: 0 0 8px; }}
+    h2 {{
+      font-size: 22px;
+      margin-top: 34px;
+      border-bottom: 1px solid #d8dee4;
+      padding-bottom: 8px;
+    }}
+    h3 {{
+      margin-top: 20px;
+      font-size: 17px;
+      border-left: 4px solid #2f6feb;
+      padding-left: 10px;
+    }}
+    pre {{
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      overflow-x: auto;
+      padding: 12px;
+      line-height: 1.45;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }}
+    code {{ font-family: Consolas, "SFMono-Regular", monospace; }}
+    .katex {{ font-size: 1.04em; }}
+    .katex-display {{ overflow-x: auto; overflow-y: hidden; }}
+    .meta {{ color: #57606a; font-size: 13px; }}
+    .notice {{
+      background: #fff8c5;
+      border: 1px solid #eac54f;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin: 14px 0 20px;
+    }}
+    .task-solution {{ page-break-before: always; }}
+    .task-solution:first-of-type {{ page-break-before: auto; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{title}</h1>
+    <div class="meta">Generated: {generated_at}</div>
+  </header>
+  <div class="notice">Auto-generated editorial for internal study. Please verify with official/editorial sources when needed.</div>
+  {''.join(sections)}
+  <footer class="meta" data-meta="{meta_json}"></footer>
+</body>
+</html>
+"""
+
+
+def resolve_task_list_for_event(event, report):
+    auto_contest = is_auto_contest_request(event)
+    contest_id = get_contest_id(event)
+    candidates = [contest_id]
+    if auto_contest:
+        candidates = resolve_auto_contest_ids()
+        if contest_id not in candidates:
+            candidates.insert(0, contest_id)
+        report["auto_contest_candidates"] = candidates
+
+    tasks_res = None
+    task_list_attempts = []
+    for candidate in candidates:
+        tasks_url = f"https://atcoder.jp/contests/{candidate}/tasks"
+        current = atcoder_get(tasks_url)
+        attempt = {
+            "contest_id": candidate,
+            "url": tasks_url,
+            "ok": current.get("ok"),
+            "status": current.get("status"),
+            "ms": current.get("ms"),
+            "bytes": current.get("bytes"),
+        }
+        task_list_attempts.append(attempt)
+        if current.get("ok"):
+            return candidate, current, task_list_attempts
+    return contest_id, tasks_res, task_list_attempts
+
+
+def run_solutions(event=None):
+    started = time.perf_counter()
+    cfg = oss_config()
+    require_oss_config(cfg)
+
+    force = env("FORCE_REPROCESS", "0") == "1" or env("SOLUTION_FORCE_REPROCESS", "0") == "1"
+    send_enabled = env("WECOM_SEND", "0") == "1"
+    target_task_ids = get_target_task_ids(event)
+    allowed_letters = allowed_solution_letters()
+
+    report = {
+        "ok": True,
+        "mode": "solutions",
+        "image_build_id": env("IMAGE_BUILD_ID", "unknown"),
+        "send_enabled": send_enabled,
+        "task_letters": sorted(allowed_letters),
+        "time": now_iso(),
+        "tasks": [],
+    }
+    if isinstance(event, dict):
+        report["event_debug"] = {
+            "keys": sorted(str(k) for k in event.keys() if not str(k).startswith("_raw")),
+            "contest_id": event.get("contest_id") or event.get("contest"),
+            "task_ids": event.get("task_ids"),
+            "raw_preview": event.get("_raw_event_preview", "")[:500],
+        }
+
+    contest_id, tasks_res, attempts = resolve_task_list_for_event(event, report)
+    report["contest_id"] = contest_id
+    report["task_list_attempts"] = attempts
+    report["task_list"] = attempts[-1] if attempts else {}
+    if not tasks_res:
+        report["ok"] = False
+        report["error"] = "failed to fetch task list"
+        return report
+
+    delivery_key = f"{cfg['prefix']}/solutions/{contest_id}/delivery.json"
+    delivery = load_json_object(cfg, delivery_key, {})
+    if delivery.get("sent") and not force:
+        report["skipped"] = True
+        report["reason"] = "solutions already sent"
+        report["delivery"] = delivery
+        report["total_ms"] = ms_since(started)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return report
+
+    task_infos = parse_tasks(contest_id, tasks_res.get("body", ""))
+    if target_task_ids:
+        task_infos = [x for x in task_infos if x["task_id"] in target_task_ids]
+    else:
+        task_infos = [x for x in task_infos if task_letter(x["task_id"]) in allowed_letters]
+
+    max_tasks = int(env("SOLUTION_MAX_TASKS", str(len(allowed_letters))))
+    task_infos = task_infos[:max_tasks]
+    report["discovered_task_count"] = len(task_infos)
+
+    solutions = []
+    for task in task_infos:
+        task_id = task["task_id"]
+        task_report = {"task_id": task_id, "url": task["url"]}
+        try:
+            page_res = atcoder_get(task["url"])
+            task_report["fetch"] = {
+                "ok": page_res.get("ok"),
+                "status": page_res.get("status"),
+                "ms": page_res.get("ms"),
+                "bytes": page_res.get("bytes"),
+            }
+            if not page_res.get("ok"):
+                raise RuntimeError(page_res.get("error") or "failed to fetch task page")
+
+            page_html = page_res["body"]
+            title = parse_title(page_html)
+            statement_html = extract_english_statement(page_html)
+            if not statement_html:
+                raise RuntimeError("cannot extract English task statement")
+            source_hash = sha256_text(statement_html)
+            statement_text = html_to_plain_text(statement_html)
+
+            solution_key = f"{cfg['prefix']}/solutions/{contest_id}/{task_id}.json"
+            cached = load_json_object(cfg, solution_key, {})
+            if cached.get("source_hash") == source_hash and cached.get("solution") and not force:
+                solution_obj = cached["solution"]
+                task_report["solution_cached"] = True
+            else:
+                sol_start = time.perf_counter()
+                solution_obj = generate_solution_json(task_id, title, statement_text)
+                oss_put_json(cfg, solution_key, {
+                    "contest_id": contest_id,
+                    "task_id": task_id,
+                    "title": title,
+                    "url": task["url"],
+                    "source_hash": source_hash,
+                    "solution": solution_obj,
+                    "generated_at": now_iso(),
+                })
+                task_report["solution"] = {"ms": ms_since(sol_start)}
+
+            solutions.append({
+                "task_id": task_id,
+                "title": title,
+                "url": task["url"],
+                "solution": solution_obj,
+            })
+            task_report["ok"] = True
+        except Exception as e:
+            task_report["ok"] = False
+            task_report["error"] = repr(e)
+            report["ok"] = False
+        report["tasks"].append(task_report)
+
+    if not solutions:
+        report["ok"] = False
+        report["error"] = "no solutions generated"
+        report["total_ms"] = ms_since(started)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return report
+
+    html_key = f"{cfg['prefix']}/solutions/{contest_id}/{contest_id}_solutions_af.zh.html"
+    pdf_key = f"{cfg['prefix']}/solutions/{contest_id}/{contest_id}_solutions_af.zh.pdf"
+    book_html = render_solutions_html(contest_id, solutions, {
+        "contest_id": contest_id,
+        "task_count": len(solutions),
+        "letters": sorted(allowed_letters),
+    })
+    oss_put_bytes(cfg, html_key, book_html.encode("utf-8"), "text/html; charset=utf-8")
+
+    pdf_start = time.perf_counter()
+    pdf_bytes = render_pdf_bytes(book_html)
+    oss_put_bytes(cfg, pdf_key, pdf_bytes, "application/pdf")
+    report["combined"] = {
+        "html_key": html_key,
+        "pdf_key": pdf_key,
+        "pdf_bytes": len(pdf_bytes),
+        "pdf_ms": ms_since(pdf_start),
+    }
+
+    if send_enabled:
+        file_name = f"{contest_id}_solutions_A-F.zh.pdf"
+        result = wecom_send_file(file_name, pdf_bytes, "application/pdf")
+        delivery = {
+            "sent": True,
+            "sent_at": now_iso(),
+            "pdf_key": pdf_key,
+            "task_count": len(solutions),
+            "wecom_result": result,
+        }
+        oss_put_json(cfg, delivery_key, delivery)
+        report["sent"] = True
+    else:
+        report["sent"] = False
+
+    report["processed_count"] = len(solutions)
+    report["total_ms"] = ms_since(started)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return report
+
+
 def test_atcoder():
     urls = env("ATCODER_TEST_URLS")
     if not urls:
@@ -1298,6 +1795,73 @@ def test_atcoder():
         "has_cookie_header": bool(cookie),
     }
     return results
+
+
+def check_atcoder_session():
+    started = time.perf_counter()
+    cookie, source = get_atcoder_cookie()
+    res = atcoder_get("https://atcoder.jp/settings")
+    body = res.get("body", "")
+    title = parse_title(body)
+    logged_in = (
+        res.get("ok")
+        and (
+            "General Settings - AtCoder" in title
+            or "'login_status': 'logged_in'" in body
+            or '"login_status": "logged_in"' in body
+        )
+    )
+    return {
+        "ok": bool(logged_in),
+        "status": res.get("status"),
+        "ms": ms_since(started),
+        "bytes": res.get("bytes"),
+        "title": title,
+        "cookie_source": source,
+        "cookie_length": len(cookie),
+        "has_REVEL_SESSION": "REVEL_SESSION=" in cookie,
+        "body_preview": (res.get("body_preview") or res.get("error") or "")[:500],
+    }
+
+
+def run_session_check(event=None):
+    started = time.perf_counter()
+    result = check_atcoder_session()
+    notify_ok = env("SESSION_CHECK_NOTIFY_OK", "0") == "1"
+    notify_fail = env("SESSION_CHECK_NOTIFY_FAIL", "1") != "0"
+
+    report = {
+        "ok": result["ok"],
+        "mode": "session_check",
+        "image_build_id": env("IMAGE_BUILD_ID", "unknown"),
+        "time": now_iso(),
+        "atcoder_session": result,
+        "notified": False,
+    }
+
+    if result["ok"]:
+        if notify_ok:
+            wecom_send_text(
+                "AtCoder session check OK\n"
+                f"time: {now_iso()}\n"
+                f"title: {result.get('title')}\n"
+                f"latency: {result.get('ms')}ms"
+            )
+            report["notified"] = True
+    elif notify_fail:
+        wecom_send_text(
+            "AtCoder session check FAILED\n"
+            "请在周六比赛前更新 FunctionGraph 环境变量 ATCODER_REVEL_SESSION。\n"
+            f"time: {now_iso()}\n"
+            f"status: {result.get('status')}\n"
+            f"title: {result.get('title')}\n"
+            f"has_REVEL_SESSION: {result.get('has_REVEL_SESSION')}"
+        )
+        report["notified"] = True
+
+    report["total_ms"] = ms_since(started)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return report
 
 
 def test_oss():
@@ -1406,6 +1970,10 @@ def handler(event, context):
             mode = str(event["mode"]).lower()
         if mode == "probe":
             return run_probe(event)
+        if mode in ("session_check", "check_session", "atcoder_session_check"):
+            return run_session_check(event)
+        if mode in ("solutions", "solution", "editorial", "editorials"):
+            return run_solutions(event)
         return run_worker(event)
     except Exception:
         report = {"ok": False, "error": traceback.format_exc()[-3000:]}

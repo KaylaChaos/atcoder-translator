@@ -27,7 +27,7 @@ WORKER_MODE=worker
 
 ATCODER_CONTEST_ID=auto
 ATCODER_AUTO_CONTEST_MODE=active_or_next
-ATCODER_AUTO_INCLUDE_UPCOMING=0
+ATCODER_AUTO_UPCOMING_LIMIT=3
 ATCODER_REVEL_SESSION=<REVEL_SESSION value only>
 ATCODER_USER_AGENT=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36
 
@@ -85,6 +85,89 @@ The function checks:
 
 Set `WECOM_PROBE_SEND=1` only when you want to send a real test message.
 
+## Session Check Mode
+
+Use this mode for a Friday timer that checks whether `ATCODER_REVEL_SESSION` is still valid.
+
+Timer event:
+
+```json
+{"mode":"session_check"}
+```
+
+Environment variables:
+
+```text
+SESSION_CHECK_NOTIFY_FAIL=1
+SESSION_CHECK_NOTIFY_OK=0
+```
+
+By default, the function sends a WeCom alert only when the AtCoder session is invalid. Set `SESSION_CHECK_NOTIFY_OK=1` if you also want a weekly success message.
+
+Suggested Friday cron:
+
+```text
+0 0 18 ? * FRI
+```
+
+If your FunctionGraph console requires 7 fields:
+
+```text
+0 0 18 ? * FRI *
+```
+
+## Solutions Mode
+
+Use this mode after the contest to generate one combined A-F editorial PDF and send it to WeCom.
+
+Timer event:
+
+```json
+{"mode":"solutions"}
+```
+
+Default scope:
+
+```text
+SOLUTION_TASK_LETTERS=A,B,C,D,E,F
+SOLUTION_MAX_TASKS=6
+OPENAI_SOLUTION_MAX_TOKENS=7000
+OPENAI_SOLUTION_MODEL=<optional-stronger-model>
+SOLUTION_REVIEW_PASS=1
+```
+
+`OPENAI_SOLUTION_MODEL` is optional. If it is empty, the worker uses `OPENAI_MODEL`. `SOLUTION_REVIEW_PASS=1` asks the model to review and correct the generated editorial/code once before rendering the final PDF.
+
+The worker caches each task solution under:
+
+```text
+atcoder-translator/solutions/<contest_id>/<task_id>.json
+```
+
+The combined PDF is saved to:
+
+```text
+atcoder-translator/solutions/<contest_id>/<contest_id>_solutions_af.zh.pdf
+```
+
+It will not resend an already sent combined solution PDF unless:
+
+```text
+FORCE_REPROCESS=1
+```
+
+Suggested solutions cron:
+
+```text
+0 30 20 ? * SAT
+```
+
+If your FunctionGraph console requires 7 fields:
+
+```text
+0 30 20 ? * SAT *
+```
+
 ## Worker Mode
 
 Set:
@@ -107,14 +190,15 @@ ATCODER_AUTO_CONTEST_MODE=active_or_next
 
 The worker resolves the contest id from AtCoder's contests page:
 
-1. First ABC in `Active Contests`.
-2. First ABC in `Recent Contests`.
-3. Largest ABC number as fallback if neither section is found.
+1. First ABC in `Ongoing Contests` / `Active Contests`.
+2. Nearest ABC candidates in `Upcoming Contests`; inaccessible `/tasks` pages are skipped.
+3. First ABC in `Recent Contests`.
+4. Largest ABC number as fallback if neither section is found.
 
-By default, it does not use `Upcoming Contests`, because upcoming task pages are often 404 until the contest starts. If you want to test upcoming-first behavior, set:
+Tune how many upcoming ABC candidates are tried:
 
 ```text
-ATCODER_AUTO_INCLUDE_UPCOMING=1
+ATCODER_AUTO_UPCOMING_LIMIT=3
 ```
 
 An explicit event value still overrides auto detection:
